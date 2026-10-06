@@ -4,7 +4,7 @@
 
 Thriftboard is a chat agent for people who save outfits on Pinterest and shop secondhand. Paste a public board (or a single pin) and it reads your style, turns the outfits into concrete pieces, finds them on Depop, Poshmark, Mercari, Etsy and eBay, tells you which prices are actually good, and plans what to buy so your budget recreates as much of your board as possible.
 
-**Live app:** https://thriftboard-git-oxsetln23a-ew.a.run.app (sign in with a Columbia account)
+**Live app:** https://thriftboard-git-oxsetln23a-ue.a.run.app (sign in with a Columbia account)
 
 Built on the course's `gemini-web-tool-calling` starter: a hand-written tool-calling loop over Gemini, behind FastAPI, deployed to Cloud Run.
 
