@@ -144,9 +144,9 @@ Act as a personal stylist who shops secondhand.
 """
 
 
-def _parse_board_url(board_url: str) -> tuple[str, str] | str:
-    """Return (user, board) or an error message the model can act on."""
-    url = board_url.strip()
+def _pinterest_path(link: str) -> list[str] | str:
+    """The path parts of a Pinterest link, expanding pin.it short links. Or an error message."""
+    url = link.strip()
     if not url.startswith("http"):
         url = "https://" + url
     host = urlparse(url).netloc.lower()
@@ -156,15 +156,21 @@ def _parse_board_url(board_url: str) -> tuple[str, str] | str:
         try:
             url = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True).url
         except requests.RequestException:
-            return "Could not expand the pin.it short link. Ask the user for the full pinterest.com board URL."
+            return "Could not expand the pin.it short link. Ask the user for the full pinterest.com link."
         host = urlparse(url).netloc.lower()
 
     if "pinterest." not in host:
-        return f"'{board_url}' is not a Pinterest link. Ask the user for a board URL like pinterest.com/<user>/<board>/."
+        return f"'{link}' is not a Pinterest link. Ask the user for a board link (pinterest.com/<user>/<board>/) or a pin link (pinterest.com/pin/<id>/)."
+    return [p for p in urlparse(url).path.split("/") if p]
 
-    parts = [p for p in urlparse(url).path.split("/") if p]
+
+def _parse_board_url(board_url: str) -> tuple[str, str] | str:
+    """Return (user, board) or an error message the model can act on."""
+    parts = _pinterest_path(board_url)
+    if isinstance(parts, str):
+        return parts
     if parts and parts[0] == "pin":
-        return "That is a single pin, not a board. Ask the user for the board URL: pinterest.com/<user>/<board>/."
+        return "That is a single pin, not a board. To recreate that one outfit, call shop_the_pin with it as pin_url."
     if len(parts) < 2:
         return "That is a profile, not a board. Ask the user which board to use: pinterest.com/<user>/<board>/."
     return parts[0], parts[1]
@@ -224,6 +230,43 @@ def _read_board(board_url: str) -> str:
     })
     _save("board", f"{user}/{board}", board_cache[user, board])
     return board_cache[user, board]
+
+
+def _read_pin(pin_url: str, board: dict | None) -> tuple[dict, int | None] | str:
+    """A one-pin "board" for shop_the_pin: the pin's number on the user's board if it's there,
+    otherwise its photo read the same way a board is. Returns (board, pin number) or an error message."""
+    parts = _pinterest_path(pin_url)
+    if isinstance(parts, str):
+        return parts
+    if len(parts) < 2 or parts[0] != "pin":
+        return "That isn't a pin link. Pin links look like pinterest.com/pin/<id>/; for a board, call read_pinterest_board."
+    pin_id = parts[1]
+
+    # Already on the board the user shared: same as tapping it in the grid
+    for pin in (board or {}).get("pins", []):
+        if f"/pin/{pin_id}/" in pin["link"]:
+            return board, pin["number"]
+
+    saved = board_cache.get(("pin", pin_id)) or _saved("pin", pin_id, BOARD_TTL)
+    if not saved:
+        # A pin's public page carries its full-size image in the og:image tag. No login needed.
+        try:
+            html = requests.get(f"https://www.pinterest.com/pin/{pin_id}/", headers=HEADERS, timeout=15).text
+        except requests.RequestException as e:
+            return f"Pinterest could not be reached ({type(e).__name__}). Tell the user to try again in a minute."
+        image = re.search(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"', html) or re.search(r'<meta[^>]+content="([^"]+)"[^>]+property="og:image"', html)
+        if not image:
+            return "That pin couldn't be opened. It may be private or deleted. Ask the user for another pin."
+        pin = {"number": 1, "image": image.group(1), "link": f"https://www.pinterest.com/pin/{pin_id}/"}
+        read = _vision([{"type": "text", "text": BOARD_PROMPT.format(n=1)}, {"type": "text", "text": "Pin 1:"},
+                        {"type": "image_url", "image_url": {"url": pin["image"]}}], BoardRead)
+        if isinstance(read, str):
+            return read
+        pieces = [{"number": n, **p.model_dump(), "pins": [1], "image": pin["image"]} for n, p in enumerate(read.pieces, start=1)]
+        saved = json.dumps({"style": read.style, "palette": read.palette, "outfit_pins": [1], "pieces": pieces, "pins": [pin]})
+        _save("pin", pin_id, saved)
+    board_cache["pin", pin_id] = saved
+    return json.loads(saved), None
 
 
 def read_pinterest_board(board_url: str, *, state: dict) -> str:
@@ -530,18 +573,30 @@ Give a 0-100 score for how close the pick gets, and a reason of at most 12 words
 """
 
 
-def shop_the_pin(pin_number: int, *, state: dict) -> str:
+def shop_the_pin(pin_number: int | None = None, pin_url: str | None = None, *, state: dict) -> str:
     """Recreate one pin's whole outfit secondhand and total up what it would cost."""
-    board = _board_or_error(state)
-    if isinstance(board, str):
-        return board
+    if pin_url:
+        found = _read_pin(pin_url, state.get("board"))
+        if isinstance(found, str):
+            return _error(found)
+        board, pin_number = found
+        on_board = pin_number is not None
+        pin_number = pin_number or 1
+    elif pin_number is not None:
+        board = _board_or_error(state)
+        if isinstance(board, str):
+            return board
+        on_board = True
+    else:
+        return _error("Pass pin_number for a pin on the board you read, or pin_url for a pin link the user pasted.")
+
     pieces = [p for p in board["pieces"] if pin_number in p["pins"]]
     if not pieces:
         shoppable = sorted({n for p in board["pieces"] for n in p["pins"]})
         return _error(f"Pin {pin_number} has no shoppable pieces. Pins with pieces: {shoppable}. Ask the user to pick one of those.")
     # Skip what the user said they own (remembered by board_unlock), and put garments first:
     # they make the outfit; a bag or bracelet is the first thing to drop
-    owned = [p for p in pieces if p["number"] in state.get("owned", set())]
+    owned = [p for p in pieces if on_board and p["number"] in state.get("owned", set())]
     pieces = sorted((p for p in pieces if p not in owned), key=lambda p: p["category"] not in GARMENTS)[:MAX_PIN_PIECES]
     if not pieces:
         return _error(f"The user already owns every piece in pin {pin_number}. Tell them they can wear this look today.")
@@ -583,7 +638,7 @@ def shop_the_pin(pin_number: int, *, state: dict) -> str:
     total = sum(l["price"] for l in shown)
     queries = {p["number"]: p["query"] for p in pieces}
     return json.dumps({
-        "pin": pin_number,
+        "pin": pin_number if on_board else None,  # None: a pasted pin that isn't on the user's board
         "pin_image": pin["image"],
         "pin_link": pin["link"],
         "pieces": [
@@ -863,10 +918,13 @@ TOOLS = [
         "shop_the_pin",
         "Recreate one pin's whole outfit secondhand: searches every piece in that pin, has a stylist pick the listing "
         "that best matches the pin's photo for each piece, and totals the outfit's cost against what those pieces "
-        "typically sell for secondhand. Call this when the user wants a specific pin or look, e.g. 'get me pin 6' or "
-        "'how much to recreate this outfit'. The picks get listing ids, so they can be price-checked or watched after.",
-        {"pin_number": {"type": "integer", "description": "The pin's number from read_pinterest_board (pins are numbered from 1), e.g. 6."}},
-        ["pin_number"],
+        "typically sell for secondhand. Call this when the user wants a specific pin or look, e.g. 'get me pin 6', "
+        "'how much to recreate this outfit', or when they paste a link to a single pin (no board needed). Pass "
+        "exactly one of pin_number or pin_url. The picks get listing ids, so they can be price-checked or watched after.",
+        {
+            "pin_number": {"type": "integer", "description": "The pin's number from read_pinterest_board (pins are numbered from 1), e.g. 6."},
+            "pin_url": {"type": "string", "description": "A link to one pin exactly as the user gave it, e.g. 'https://www.pinterest.com/pin/1093882197027642046/' or a 'pin.it/...' short link."},
+        },
     ),
     _tool(
         "board_unlock",

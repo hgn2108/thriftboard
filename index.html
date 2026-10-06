@@ -585,7 +585,7 @@
         <main>
             <section id="welcome">
                 <h1>Your Pinterest board,<br />found secondhand.</h1>
-                <p>Paste a public board link. Thriftboard reads your style, finds the pieces on Depop, Poshmark, eBay and more, and tells you what's worth buying.</p>
+                <p>Paste a public board or pin link. Thriftboard reads your style, finds the pieces on Depop, Poshmark, eBay and more, and tells you what's worth buying.</p>
             </section>
             <div id="messages"></div>
         </main>
@@ -594,7 +594,7 @@
             <div class="composer">
                 <div id="suggestions"></div>
                 <form id="form">
-                    <input id="input" placeholder="Paste a Pinterest board link…" autocomplete="off" />
+                    <input id="input" placeholder="Paste a Pinterest board or pin link…" autocomplete="off" />
                     <button id="send" type="submit">Send</button>
                 </form>
             </div>
@@ -693,7 +693,7 @@
                 const saved = r.saved_vs_typical > 0 ? `<span class="save">${money(Math.round(r.saved_vs_typical))} under typical</span>` : "";
                 const own = r.already_own?.length ? `<div class="note">Skipped what you own: ${esc(r.already_own.join(", "))}</div>` : "";
                 return `<div class="block outfit">${img(r.pin_image, "Pin " + r.pin)}
-                    <div class="picks"><div class="label">Pin ${esc(r.pin)}, secondhand</div>${picks}${own}
+                    <div class="picks"><div class="label">${r.pin ? `Pin ${esc(r.pin)}` : "Your pin"}, secondhand</div>${picks}${own}
                     <div class="total"><span>Outfit total <span class="big">${money(Math.round(r.total))}</span></span>${saved}</div></div></div>`;
             }
 
@@ -773,7 +773,7 @@
             }
 
             function nextSuggestions() {
-                input.placeholder = board ? "Ask about your board…" : "Paste a Pinterest board link…";
+                input.placeholder = board ? "Ask about your board, or paste a pin…" : "Paste a Pinterest board or pin link…";
                 if (!board) return startSuggestions();
                 const firstPin = board.pieces?.[0]?.pins?.[0] || 1;
                 setSuggestions([
