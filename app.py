@@ -5,33 +5,53 @@ from pathlib import Path
 
 import litellm
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from tools import TOOLS, run_tool
+load_dotenv(Path(__file__).parent / ".env")  # SERPAPI_KEY locally; Cloud Run sets it as an env var
+
+from tools import TOOLS, run_tool  # noqa: E402
 
 # --- Config ---
 
-SYSTEM_PROMPT = """You are a secondhand personal shopper. Users share a Pinterest board of outfits
-they love, and you help them find those pieces secondhand at a price they're happy with.
+SYSTEM_PROMPT = """You are Thriftboard, a secondhand personal shopper. Users share a Pinterest board of
+outfits they love, and you help them find those pieces secondhand at a price they're happy with.
 
-Tools:
-- read_pinterest_board: call it whenever the user shares a Pinterest link or asks what to shop
-  for from their board. Never describe a board you haven't read with this tool.
+When to use each tool:
+- read_pinterest_board: whenever the user shares a Pinterest link. Never describe a board you
+  haven't read with this tool.
+- search_listings: when the user wants to find or shop a piece. For a board piece, pass its query
+  and its broad_query as fallback_query. Pass max_price and size whenever the user has given them,
+  including earlier in the conversation.
+- price_verdict: when the user asks if something is a good deal, worth it, or fairly priced.
+- style_match: when the user asks which listing fits their board or style best, or which to pick.
+- watch_item: when the user asks to watch, track, or be alerted about a piece at a price.
+- check_watchlist: when the user asks what's new, to check their watchlist, or about price drops.
+Don't call tools for general styling chat you can answer from what's already in the conversation.
+When the user refers to "the second piece" or "that skirt", resolve it from the numbered lists
+you already gave.
 
-Style:
-- After reading a board, open with the style summary in your own words, then list the pieces as a
-  short numbered list (query + category) so the user can refer to them by number.
+How to answer:
+- After reading a board, open with the style in your own words, then the pieces as a short
+  numbered list so the user can refer to them by number. End by suggesting a next step.
+- When showing listings, give the best 3-5 with price, site, and the listing id (L1, L2...).
+  The app shows every listing as a card with photo and link, so don't paste URLs.
+- Keep replies short and specific. Be honest when a listing doesn't really match.
+- The watchlist doesn't send notifications: after watching a piece, tell the user to come back
+  and ask "what's new on my watchlist?" to see new listings and price drops.
 - If a tool returns an error, explain it plainly and tell the user exactly what to do next.
-- Never invent listings, prices, or links."""
-MAX_TOOL_ROUNDS = 5
+- Never invent listings, prices, links, or scores."""
+MAX_TOOL_ROUNDS = 8  # a turn can chain several tools, e.g. search, then verdict, then style match
 
 # --- The Harness ---
 
 
-def run_agent(messages: list[dict]) -> tuple[str, list[dict]]:
+def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
     """Complete until the model answers without asking for a tool.
+
+    `state` is the session's scratchpad, passed to every tool by the harness, never by the model.
 
     Returns the final text and a record of every tool call made along the way.
     """
@@ -57,7 +77,7 @@ def run_agent(messages: list[dict]) -> tuple[str, list[dict]]:
         # The harness, not the model, runs each tool and appends the result
         for call in reply.tool_calls:
             args = json.loads(call.function.arguments)
-            result = run_tool(call.function.name, args)
+            result = run_tool(call.function.name, args, state)
             tool_calls += [{"name": call.function.name, "args": args, "result": result}]
 
             messages += [{"role": "tool", "tool_call_id": call.id, "content": result}]
@@ -69,6 +89,10 @@ def run_agent(messages: list[dict]) -> tuple[str, list[dict]]:
 
 # session_id -> list of messages. In-memory, single process.
 sessions: dict[str, list] = {}
+
+# session_id -> tool state: last board read, last search results. The watchlist lives in Firestore
+# under the session id, so it survives restarts as long as the browser keeps its session id.
+states: dict[str, dict] = {}
 
 # --- FastAPI App ---
 
@@ -97,12 +121,13 @@ def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     if session_id not in sessions:
         sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        states[session_id] = {"session_id": session_id}
 
     # Append user's message to the context
     sessions[session_id] += [{"role": "user", "content": request.message}]
 
     try:
-        response, tool_calls = run_agent(sessions[session_id])
+        response, tool_calls = run_agent(sessions[session_id], states[session_id])
     except Exception as e:
         # Auth, billing, a model that is not running: show it in the chat, not as a 500.
         response, tool_calls = f"Model call failed: {type(e).__name__}: {str(e)[:300]}", []
@@ -113,6 +138,7 @@ def chat(request: ChatRequest):
 @app.post("/clear")
 def clear(session_id: str | None = None):
     sessions.pop(session_id, None)
+    states.pop(session_id, None)
     return {"status": "ok"}
 
 
