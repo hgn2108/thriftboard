@@ -160,7 +160,8 @@ class ChatResponse(BaseModel):
 
 @app.get("/")
 def index():
-    return FileResponse(Path(__file__).parent / "index.html")
+    # no-cache: browsers revalidate each visit, so a redeploy shows up without a hard refresh
+    return FileResponse(Path(__file__).parent / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/chat", response_model=ChatResponse)

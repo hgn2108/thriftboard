@@ -364,7 +364,9 @@
             .pick .what {
                 font-size: 0.75rem;
                 color: var(--muted);
-                text-transform: capitalize;
+            }
+            .pick .what::first-letter {
+                text-transform: uppercase;
             }
             .total {
                 margin-top: auto;
@@ -770,7 +772,7 @@
             }
 
             function nextSuggestions() {
-                input.placeholder = board ? "Ask about your board…" : "Paste a board or pin link…";
+                input.placeholder = board ? "Ask a follow-up…" : "Paste a board or pin link…";
                 if (!board) return startSuggestions();
                 const firstPin = board.pieces?.[0]?.pins?.[0] || 1;
                 setSuggestions([

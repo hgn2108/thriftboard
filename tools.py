@@ -798,7 +798,8 @@ def board_unlock(budget: float, owned_pieces: list[int] | None = None, *, state:
             for n in best
         ],
         "next_best_buy": (
-            {"piece": upgrade, "looking_for": pieces[upgrade]["query"], "listing": cards[upgrade], "would_recreate_more": gain}
+            {"piece": upgrade, "looking_for": pieces[upgrade]["query"], "listing": cards[upgrade], "would_recreate_more": gain,
+             "budget_left_after_plan": round(budget - best_cost, 2), "fits_in_budget_left": prices[upgrade] <= budget - best_cost}
             if gain else None
         ),
         "couldnt_find": missed,
