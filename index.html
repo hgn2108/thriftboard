@@ -412,21 +412,6 @@
                 background: var(--accent);
                 border-radius: 999px;
             }
-            .buys {
-                list-style: none;
-                margin-bottom: 0.8rem;
-            }
-            .buys li {
-                display: flex;
-                justify-content: space-between;
-                gap: 1rem;
-                padding: 0.4rem 0;
-                border-bottom: 1px solid var(--line);
-                font-size: 0.9rem;
-            }
-            .buys li span:first-child::first-letter {
-                text-transform: uppercase;
-            }
             .unlock .pins {
                 grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
             }
@@ -594,7 +579,7 @@
             <div class="composer">
                 <div id="suggestions"></div>
                 <form id="form">
-                    <input id="input" placeholder="Paste a Pinterest board or pin link…" autocomplete="off" />
+                    <input id="input" placeholder="Paste a board or pin link…" autocomplete="off" />
                     <button id="send" type="submit">Send</button>
                 </form>
             </div>
@@ -657,7 +642,7 @@
                 return `<a class="card" href="${url(l.link)}" target="_blank" rel="noopener">
                     <div class="img">${img(l.image, l.title)}${l.id ? `<span class="id">${esc(l.id)}</span>` : ""}</div>
                     <div class="body">
-                        <div><span class="price">${money(l.price)}</span> <span class="site">· ${esc(l.site)}</span></div>
+                        <div><span class="price">${money(l.price)}</span> <span class="site">· ${esc(l.site)}${l.size ? ` · ${esc(l.size)}` : ""}</span></div>
                         <div class="title">${esc(l.title)}</div>
                         ${badges.length ? `<div class="badges">${badges.join("")}</div>` : ""}
                     </div></a>`;
@@ -679,17 +664,22 @@
                     ${pinGrid(r.pins)}</div>`;
             }
 
+            // One picked listing as a row: what it stands in for, the listing, its match and verdict
+            function pickRow(what, l, match, verdict, note = "") {
+                const badges = [
+                    match != null ? `<span class="badge match">${esc(match)}% match</span>` : "",
+                    verdict && verdict.verdict !== "unknown" ? `<span class="badge ${esc(verdict.verdict)}">${esc(verdict.verdict)}</span>` : "",
+                    l.size ? `<span class="badge">Size ${esc(l.size)}</span>` : "",
+                    l.id ? `<span class="badge">${esc(l.id)}</span>` : "",
+                ].join("");
+                return `<a class="pick" href="${url(l.link)}" target="_blank" rel="noopener">
+                    ${img(l.image, l.title)}
+                    <div><div class="what">${esc(what)}${note ? ` · ${esc(note)}` : ""}</div><div class="title">${esc(l.title)}</div><div class="badges">${badges}</div></div>
+                    <div><div class="price">${money(l.price)}</div><div class="site">${esc(l.site)}</div></div></a>`;
+            }
+
             function outfitBlock(r, verdicts) {
-                const picks = r.pieces
-                    .map((p) => {
-                        const v = verdicts[p.pick.id];
-                        return `<a class="pick" href="${url(p.pick.link)}" target="_blank" rel="noopener">
-                            ${img(p.pick.image, p.pick.title)}
-                            <div><div class="what">${esc(p.looking_for)}</div><div class="title">${esc(p.pick.title)}</div>
-                            <div class="badges">${p.style_score != null ? `<span class="badge match">${esc(p.style_score)}% match</span>` : ""}${v ? `<span class="badge ${esc(v.verdict)}">${esc(v.verdict)}</span>` : ""}<span class="badge">${esc(p.pick.id)}</span></div></div>
-                            <div><div class="price">${money(p.pick.price)}</div><div class="site">${esc(p.pick.site)}</div></div></a>`;
-                    })
-                    .join("");
+                const picks = r.pieces.map((p) => pickRow(p.looking_for, p.pick, p.style_score, verdicts[p.pick.id])).join("");
                 const saved = r.saved_vs_typical > 0 ? `<span class="save">${money(Math.round(r.saved_vs_typical))} under typical</span>` : "";
                 const own = r.already_own?.length ? `<div class="note">Skipped what you own: ${esc(r.already_own.join(", "))}</div>` : "";
                 return `<div class="block outfit">${img(r.pin_image, "Pin " + r.pin)}
@@ -697,15 +687,16 @@
                     <div class="total"><span>Outfit total <span class="big">${money(Math.round(r.total))}</span></span>${saved}</div></div></div>`;
             }
 
-            function unlockBlock(r) {
-                const buys = r.buy.map((b) => `<li><span>${esc(b.query)}</span><span class="site">in ${b.in_pins.length} pins · ~${money(Math.round(b.good_secondhand_price))}</span></li>`).join("");
-                const next = r.next_best_buy ? `<div class="note">Next best: ${esc(r.next_best_buy.query)} (~${money(Math.round(r.next_best_buy.price))}) unlocks ${esc(r.next_best_buy.unlocks_more_pins)} more.</div>` : "";
-                const pins = board?.pins ? `<div class="label" style="margin-top:.9rem">Outfits you could wear</div>${pinGrid(board.pins, new Set(r.unlocked_with_plan))}` : "";
+            function unlockBlock(r, verdicts) {
+                const buys = r.buy.map((b) => pickRow(b.looking_for, b.listing, b.match, verdicts[b.listing.id], `in ${b.in_pins.length} outfits`)).join("");
+                const nb = r.next_best_buy;
+                const next = nb ? `<div class="label" style="margin-top:.9rem">Next best buy · ${esc(nb.would_recreate_more)} more outfit${nb.would_recreate_more > 1 ? "s" : ""}</div><div class="picks">${pickRow(nb.looking_for, nb.listing, null, verdicts[nb.listing.id])}</div>` : "";
+                const pins = board?.pins ? `<div class="label" style="margin-top:.9rem">Outfits you could wear</div>${pinGrid(board.pins, new Set(r.recreated_pins))}` : "";
                 return `<div class="block unlock">
-                    <div class="big">${esc(r.unlocked_with_plan.length)} of ${esc(r.outfit_pins)}</div>
+                    <div class="big">${esc(r.outfits_recreated)} of ${esc(r.outfits_on_board)}</div>
                     <div class="note">outfits on your board for ${money(Math.round(r.spend))} of your ${money(r.budget)}</div>
                     <div class="meter"><div style="width:${Math.min(100, Number(r.pct_of_board) || 0)}%"></div></div>
-                    ${buys ? `<div class="label">Buy</div><ul class="buys">${buys}</ul>` : ""}${next}${pins}</div>`;
+                    ${buys ? `<div class="label">Buy</div><div class="picks">${buys}</div>` : ""}${next}${pins}</div>`;
             }
 
             function watchRow(w) {
@@ -745,12 +736,18 @@
                     } else if (name === "search_listings") {
                         shown = Object.fromEntries(r.listings.map((l) => [l.id, l]));
                         r.listings.forEach((l) => listed.add(l.id));
-                        if (r.listings.length) html += listingRow(r.listings, verdicts, scores);
+                        const order = Object.keys(scores).length ? [...r.listings].sort((a, b) => (scores[b.id]?.score ?? -1) - (scores[a.id]?.score ?? -1)) : r.listings;
+                        if (order.length) html += listingRow(order, verdicts, scores);
                     } else if (name === "shop_the_pin") {
                         shown = Object.fromEntries(r.pieces.map((p) => [p.pick.id, p.pick]));
                         r.pieces.forEach((p) => listed.add(p.pick.id));
                         html += outfitBlock(r, verdicts);
-                    } else if (name === "board_unlock") html += unlockBlock(r);
+                    } else if (name === "board_unlock") {
+                        const ls = [...r.buy.map((b) => b.listing), ...(r.next_best_buy ? [r.next_best_buy.listing] : [])];
+                        shown = Object.fromEntries(ls.map((l) => [l.id, l]));
+                        ls.forEach((l) => listed.add(l.id));
+                        html += unlockBlock(r, verdicts);
+                    }
                     else if (name === "watch_item") html += watchAdded(r);
                     else if (name === "check_watchlist" && r.watching.length) html += `<div class="block">${r.watching.map(watchRow).join("")}</div>`;
                 }
@@ -773,7 +770,7 @@
             }
 
             function nextSuggestions() {
-                input.placeholder = board ? "Ask about your board, or paste a pin…" : "Paste a Pinterest board or pin link…";
+                input.placeholder = board ? "Ask about your board…" : "Paste a board or pin link…";
                 if (!board) return startSuggestions();
                 const firstPin = board.pieces?.[0]?.pins?.[0] || 1;
                 setSuggestions([

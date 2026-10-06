@@ -1,6 +1,9 @@
 import json
 import os
+import re
+import time
 import uuid
+import zlib
 from pathlib import Path
 
 import litellm
@@ -12,7 +15,9 @@ from pydantic import BaseModel
 
 load_dotenv(Path(__file__).parent / ".env")  # SERPAPI_KEY locally; Cloud Run sets it as an env var
 
-from tools import TOOLS, run_tool  # noqa: E402
+from google.api_core.exceptions import GoogleAPIError  # noqa: E402
+
+from tools import TOOLS, _firestore, run_tool  # noqa: E402
 
 # --- Config ---
 
@@ -36,7 +41,8 @@ When to use each tool:
 - watch_item: when the user asks to watch, track, or be alerted. Watch a search (query +
   target_price) to catch new listings under a price, or specific listings (listing_ids) to follow
   price drops and sell-outs. If it's unclear which they want, ask.
-- check_watchlist: when the user asks what's new, to check their watchlist, or about price drops.
+- check_watchlist: whenever the user asks about their watchlist, what's new, or price drops.
+  Always call it; never assume the watchlist is empty or unchanged.
 - unwatch_item: when the user wants to stop watching something.
 Don't call tools for general styling chat you can answer from what's already in the conversation.
 When the user refers to "the second piece" or "that skirt", resolve it from the numbered lists
@@ -47,8 +53,9 @@ How to answer:
   numbered list so the user can refer to them by number. End by suggesting next steps: shop a
   pin, or plan purchases with a budget.
 - For shop_the_pin, lead with the outfit total and savings, then one line per piece.
-- For board_unlock, open with one bold sentence such as "**$95 recreates 9 of your 24 outfits.**",
-  then what to buy and why those pieces carry the board, then the next best buy.
+- For board_unlock, open with its headline, bold and word for word, then each listing to buy
+  (price, site, id) and why that piece carries the board, then the next best buy. Every number
+  must come from the tool result; never recompute or round differently.
 - When showing listings, give the best 3-5 with price, site, and the listing id (L1, L2...).
   The app shows every listing as a card with photo and link, so don't paste URLs.
 - Keep replies short and specific. Be honest when a listing doesn't really match.
@@ -89,8 +96,12 @@ def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
 
         # The harness runs each tool and appends the result
         for call in reply.tool_calls:
-            args = json.loads(call.function.arguments)
-            result = run_tool(call.function.name, args, state)
+            try:
+                args = json.loads(call.function.arguments or "{}")
+                result = run_tool(call.function.name, args, state)
+            except json.JSONDecodeError:
+                # Every tool call must get a result, or the next completion rejects the history
+                args, result = {}, json.dumps({"error": "The arguments were not valid JSON. Call the tool again with a JSON object."})
             tool_calls += [{"name": call.function.name, "args": args, "result": result}]
 
             messages += [{"role": "tool", "tool_call_id": call.id, "content": result}]
@@ -100,12 +111,36 @@ def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
 
 # --- Session Store ---
 
-# session_id -> list of messages. In-memory, single process.
+# session_id -> list of messages, and session_id -> tool state (last board read, last listings
+# shown, pieces the user owns). Kept in memory for speed and saved to Firestore after every turn:
+# Cloud Run stops idle instances and may run several, and a conversation must survive both.
 sessions: dict[str, list] = {}
-
-# session_id -> tool state: last board read, last search results. The watchlist lives in Firestore
-# under the session id, so it survives restarts as long as the browser keeps its session id.
 states: dict[str, dict] = {}
+
+
+def load_session(session_id: str) -> bool:
+    """Bring a saved session back into memory. False if there is none (or Firestore is unreachable)."""
+    try:
+        doc = _firestore().collection("sessions").document(session_id).get()
+    except GoogleAPIError:
+        return False
+    if not doc.exists:
+        return False
+    saved = json.loads(zlib.decompress(doc.get("data")))
+    sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}] + saved["messages"][1:]
+    states[session_id] = {**saved["state"], "owned": set(saved["state"].get("owned", []))}
+    return True
+
+
+def save_session(session_id: str) -> None:
+    state = {**states[session_id], "owned": sorted(states[session_id].get("owned", set()))}
+    blob = zlib.compress(json.dumps({"messages": sessions[session_id], "state": state}, default=str).encode())
+    if len(blob) > 900_000:  # Firestore's limit is 1 MB a document; a session that long stays in memory only
+        return
+    try:
+        _firestore().collection("sessions").document(session_id).set({"data": blob, "updated": time.time()})
+    except GoogleAPIError:
+        pass
 
 # --- FastAPI App ---
 
@@ -130,9 +165,9 @@ def index():
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    # Get or create the session
-    session_id = request.session_id or str(uuid.uuid4())
-    if session_id not in sessions:
+    # Get or create the session. The id becomes a database key, so only accept ids we could have issued.
+    session_id = request.session_id if re.fullmatch(r"[0-9a-f-]{36}", request.session_id or "") else str(uuid.uuid4())
+    if session_id not in sessions and not load_session(session_id):
         sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
         states[session_id] = {"session_id": session_id}
 
@@ -145,6 +180,7 @@ def chat(request: ChatRequest):
         # Auth, billing, a model that is not running: show it in the chat, not as a 500.
         response, tool_calls = f"Model call failed: {type(e).__name__}: {str(e)[:300]}", []
 
+    save_session(session_id)
     return ChatResponse(response=response, session_id=session_id, tool_calls=tool_calls)
 
 
@@ -152,6 +188,11 @@ def chat(request: ChatRequest):
 def clear(session_id: str | None = None):
     sessions.pop(session_id, None)
     states.pop(session_id, None)
+    if session_id and re.fullmatch(r"[0-9a-f-]{36}", session_id):
+        try:
+            _firestore().collection("sessions").document(session_id).delete()
+        except GoogleAPIError:
+            pass
     return {"status": "ok"}
 
 

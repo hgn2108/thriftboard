@@ -32,8 +32,11 @@ MAX_PINS = 25  # Pinterest's board RSS only ever returns the ~25 most recent pin
 MAX_LISTINGS = 8  # listings shown to the model per search; the rest still count as price comparables
 MAX_WATCHED = 6  # each watched item costs one search per check, and SerpAPI's free tier is 250/month
 MAX_PIN_PIECES = 4  # pieces shop_the_pin will hunt for in one outfit
-OPTIONS_PER_PIECE = 5  # listings per piece shown to the stylist model in shop_the_pin
+OPTIONS_PER_PIECE = 3  # per piece, the stylist model sees this many most-relevant AND this many cheapest listings
 UNLOCK_CANDIDATES = 6  # pieces board_unlock prices: one search each, and 2^6 combinations to try
+PIECE_TIMEOUT = 25  # per search when hunting several pieces at once, so one slow search can't stall the rest
+VALUE_MARGIN = 10  # a listing within this many match points of the best one is "as good"; then the cheapest wins
+MIN_MATCH = 60  # below this, a listing isn't really the piece, however cheap
 
 # A pin counts as "recreated" once you have its garments; bags and jewelry are optional extras.
 GARMENTS = {"tops", "bottoms", "dresses", "outerwear", "shoes"}
@@ -152,7 +155,7 @@ def _pinterest_path(link: str) -> list[str] | str:
     host = urlparse(url).netloc.lower()
 
     # pin.it short links redirect to the real board or pin URL
-    if host.endswith("pin.it"):
+    if host == "pin.it" or host.endswith(".pin.it"):
         try:
             url = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True).url
         except requests.RequestException:
@@ -172,7 +175,7 @@ def _parse_board_url(board_url: str) -> tuple[str, str] | str:
     if parts and parts[0] == "pin":
         return "That is a single pin, not a board. To recreate that one outfit, call shop_the_pin with it as pin_url."
     if len(parts) < 2:
-        return "That is a profile, not a board. Ask the user which board to use: pinterest.com/<user>/<board>/."
+        return "That is a profile page, not a board. Ask the user which of their boards to use: pinterest.com/<user>/<board>/."
     return parts[0], parts[1]
 
 
@@ -238,8 +241,10 @@ def _read_pin(pin_url: str, board: dict | None) -> tuple[dict, int | None] | str
     parts = _pinterest_path(pin_url)
     if isinstance(parts, str):
         return parts
-    if len(parts) < 2 or parts[0] != "pin":
-        return "That isn't a pin link. Pin links look like pinterest.com/pin/<id>/; for a board, call read_pinterest_board."
+    if len(parts) >= 2 and parts[0] != "pin":
+        return "That is a board link, not a single pin. Call read_pinterest_board with it instead."
+    if len(parts) < 2:
+        return "That is a profile page, not a pin or a board. Ask the user which board (pinterest.com/<user>/<board>/) or pin (pinterest.com/pin/<id>/) they mean."
     pin_id = parts[1]
 
     # Already on the board the user shared: same as tapping it in the grid
@@ -288,7 +293,7 @@ def _board_or_error(state: dict) -> dict | str:
 Source = Literal["marketplaces", "ebay"]
 
 
-def _serpapi(params: dict) -> dict | str:
+def _serpapi(params: dict, timeout: int = 60) -> dict | str:
     """One SerpAPI search, cached. Returns the response, or an error message the model can act on."""
     key = os.environ.get("SERPAPI_KEY", "").strip()
     if not key:
@@ -299,8 +304,8 @@ def _serpapi(params: dict) -> dict | str:
             return search_cache[cache_key]
 
     try:
-        # Most searches take 1-2s, but a fresh Google Shopping search occasionally takes ~30s
-        data = requests.get("https://serpapi.com/search.json", params={**params, "api_key": key}, timeout=60).json()
+        # Most searches take 1-2s, but a fresh Google Shopping search occasionally takes 30s or more
+        data = requests.get("https://serpapi.com/search.json", params={**params, "api_key": key}, timeout=timeout).json()
     except requests.Timeout:
         # SerpAPI keeps working after we give up and caches the result, so a retry is usually instant
         return "The search is running slowly. Tell the user to ask again in a few seconds; the retry is usually instant."
@@ -317,19 +322,32 @@ def _serpapi(params: dict) -> dict | str:
     return data
 
 
-def _search(query: str, size: str | None = None, source: Source = "marketplaces") -> list[dict] | str:
+def _search(query: str, size: str | None = None, source: Source = "marketplaces", timeout: int = 60) -> list[dict] | str:
     """_fetch_listings, but served from the saved copy when one is fresh."""
     key = json.dumps([query, size, source])
     saved = _saved("search", key, SEARCH_TTL)
     if saved:
-        return json.loads(saved)
-    listings = _fetch_listings(query, size, source)
+        listings = json.loads(saved)
+        for l in listings:
+            if "size" not in l:  # saved before titles were cleaned
+                l["title"], l["size"] = _clean_title(l["title"])
+        return listings
+    listings = _fetch_listings(query, size, source, timeout)
     if isinstance(listings, list):
         _save("search", key, json.dumps(listings))
     return listings
 
 
-def _fetch_listings(query: str, size: str | None, source: Source) -> list[dict] | str:
+def _clean_title(title: str | None) -> tuple[str, str | None]:
+    """Poshmark-style titles arrive as 'Brand Category | Title | Color: X | Size: Y | Seller's Closet'.
+    Keep the real title and pull out the size, which is worth showing on its own."""
+    parts = [p.strip() for p in (title or "").split(" | ")]
+    size = next((p.split(":", 1)[1].strip() for p in parts if p.lower().startswith("size:")), None)
+    kept = [p for p in parts if not re.match(r"(?i)(color|size):", p) and not p.lower().endswith("closet")]
+    return (max(kept, key=len) if kept else title or ""), size
+
+
+def _fetch_listings(query: str, size: str | None, source: Source, timeout: int = 60) -> list[dict] | str:
     """Search one source and normalize every priced result. Returns listings or an error message.
 
     Each listing remembers the search it came from, so later tools can re-run it (from cache) to get
@@ -340,7 +358,7 @@ def _fetch_listings(query: str, size: str | None, source: Source) -> list[dict] 
     listings = []
 
     if source == "ebay":
-        data = _serpapi({"engine": "ebay", "_nkw": q, "LH_ItemCondition": "3000"})  # 3000 = used
+        data = _serpapi({"engine": "ebay", "_nkw": q, "LH_ItemCondition": "3000"}, timeout)  # 3000 = used
         if isinstance(data, str):
             return data
         for r in data.get("organic_results", []):
@@ -354,13 +372,14 @@ def _fetch_listings(query: str, size: str | None, source: Source) -> list[dict] 
                 }]
     else:
         # Google Shopping, biased to used: covers Depop, Poshmark, Mercari, Etsy, and eBay sellers in one search
-        data = _serpapi({"engine": "google_shopping", "q": f"{q} used", "gl": "us", "hl": "en"})
+        data = _serpapi({"engine": "google_shopping", "q": f"{q} used", "gl": "us", "hl": "en"}, timeout)
         if isinstance(data, str):
             return data
         for r in data.get("shopping_results", []):
             if r.get("extracted_price") is not None:
+                title, listed_size = _clean_title(r.get("title"))
                 listings += [{
-                    "key": f"gs_{r.get('product_id')}", "title": r.get("title"), "price": r["extracted_price"],
+                    "key": f"gs_{r.get('product_id')}", "title": title, "size": listed_size, "price": r["extracted_price"],
                     "site": (r.get("source") or "unknown").split(" - ")[0],
                     "condition": r.get("second_hand_condition") or "unspecified",
                     "link": r.get("product_link"), "image": r.get("thumbnail"), "search": search,
@@ -369,20 +388,31 @@ def _fetch_listings(query: str, size: str | None, source: Source) -> list[dict] 
     return listings
 
 
-def _search_with_fallback(query: str, broad_query: str | None, size: str | None = None, source: Source = "marketplaces") -> list[dict] | str:
+def _search_with_fallback(query: str, broad_query: str | None, size: str | None = None, source: Source = "marketplaces", timeout: int = 60) -> list[dict] | str:
     """A very specific query can come back thin; the broader one usually doesn't."""
-    found = _search(query, size, source)
+    found = _search(query, size, source, timeout)
     if isinstance(found, list) and len(found) < 3 and broad_query:
-        broader = _search(broad_query, size, source)
+        broader = _search(broad_query, size, source, timeout)
         if isinstance(broader, list) and len(broader) > len(found):
             return broader
     return found
 
 
 def _search_pieces(pieces: list[dict]) -> list[list[dict] | str]:
-    """Search several board pieces at once: the wait is the slowest search, not the sum of them."""
+    """Search several board pieces at once: the wait is the slowest search, not the sum of them.
+
+    One slow search shouldn't sink the whole answer, so each gets a short timeout and one retry
+    (SerpAPI finishes the search after we give up, so the retry often comes straight from its cache).
+    Pieces that still fail come back as error strings for the caller to skip and mention.
+    """
+    def one(piece: dict) -> list[dict] | str:
+        found = _search_with_fallback(piece["query"], piece["broad_query"], timeout=PIECE_TIMEOUT)
+        if isinstance(found, str) and "slowly" in found:
+            found = _search_with_fallback(piece["query"], piece["broad_query"], timeout=PIECE_TIMEOUT)
+        return found
+
     with ThreadPoolExecutor(max_workers=len(pieces) or 1) as pool:
-        return list(pool.map(lambda p: _search_with_fallback(p["query"], p["broad_query"]), pieces))
+        return list(pool.map(one, pieces))
 
 
 def _show(listings: list[dict], state: dict) -> list[dict]:
@@ -390,7 +420,12 @@ def _show(listings: list[dict], state: dict) -> list[dict]:
     for i, listing in enumerate(listings, start=1):
         listing["id"] = f"L{i}"
     state["listings"] = {l["id"]: l for l in listings}
-    return [{k: l[k] for k in ("id", "title", "price", "site", "condition", "link", "image")} for l in listings]
+    return [_card(l) for l in listings]
+
+
+def _card(listing: dict) -> dict:
+    """The fields the model and the UI need about one listing."""
+    return {k: listing.get(k) for k in ("id", "title", "price", "site", "size", "condition", "link", "image")}
 
 
 def search_listings(
@@ -550,27 +585,92 @@ def style_match(listing_ids: list[str] | None = None, *, state: dict) -> str:
     return json.dumps({"board_style": board["style"], "scores": sorted(scored, key=lambda s: -s["score"])})
 
 
-# --- shop_the_pin ---
+# --- Value picks: the real listing to buy for each piece (shared by shop_the_pin and board_unlock) ---
 
 
-class PiecePick(BaseModel):
+class OptionScore(BaseModel):
     piece: int
     option: int
     score: int
     reason: str
 
 
-class PinPicks(BaseModel):
-    picks: list[PiecePick]
+class OptionScores(BaseModel):
+    scores: list[OptionScore]
 
 
-PIN_PROMPT = """You are a stylist recreating one outfit from a client's Pinterest board with secondhand finds.
+PICK_PROMPT = """You are a stylist helping a client shop secondhand for pieces from their Pinterest board.
 Board style: {style}
 
-Below is the pin, then for each piece in it, numbered secondhand options. For every piece, pick the
-option that best recreates the pin (silhouette, fabric, color and vibe; price only breaks ties).
-Give a 0-100 score for how close the pick gets, and a reason of at most 12 words.
+{context}For each piece below there are numbered secondhand options. Score EVERY option from 0 to 100
+on how well it would stand in for that piece on this board: silhouette, fabric, color and vibe.
+Score below 50 if it is a different garment, a kids' item, or clearly not what's wanted. Ignore price.
+Give a reason of at most 12 words for each.
 """
+
+
+def _shortlist(found: list[dict]) -> list[dict]:
+    """The most relevant few plus the cheapest few (among on-topic results). The cheapest alone are
+    often the wrong garment; the most relevant alone miss the deals. The value rule picks between them."""
+    cheapest = sorted(found[:15], key=lambda l: l["price"])[:OPTIONS_PER_PIECE]
+    return list({l["key"]: l for l in found[:OPTIONS_PER_PIECE] + cheapest}.values())
+
+
+def _value_picks(board: dict, pieces: list[dict], options: dict[int, list[dict]], pin: dict | None = None) -> dict:
+    """Pick one real listing per piece: the cheapest of the strong matches.
+
+    The stylist model scores every option in one vision call; code then applies the rule, so the
+    choice is consistent and explainable: within VALUE_MARGIN points of the best match (and at
+    least MIN_MATCH), price decides. Returns piece number -> {listing, match, reason}.
+    """
+    context = "The outfit being recreated is the pin below.\n" if pin else ""
+    content = [{"type": "text", "text": PICK_PROMPT.format(style=board["style"], context=context)}]
+    if pin:
+        content += [{"type": "image_url", "image_url": {"url": pin["image"]}}]
+    for piece in pieces:
+        for k, l in enumerate(options.get(piece["number"], []), start=1):
+            content += [{"type": "text", "text": f"Piece {piece['number']} ({piece['query']}), option {k}: {l['title']}"}]
+            if l.get("image"):
+                content += [{"type": "image_url", "image_url": {"url": l["image"]}}]
+
+    scored = _vision(content, OptionScores)
+    scores = {}
+    if isinstance(scored, OptionScores):
+        for s in scored.scores:
+            if 1 <= s.option <= len(options.get(s.piece, [])):
+                scores[s.piece, s.option] = (max(0, min(100, s.score)), s.reason)
+
+    picks = {}
+    for number, opts in options.items():
+        rated = [(scores[number, k][0], scores[number, k][1], l) for k, l in enumerate(opts, start=1) if (number, k) in scores]
+        if not rated:
+            # The style check failed: fall back to the cheapest relevant listing, and say so
+            picks[number] = {"listing": opts[0], "match": None, "reason": "style check unavailable; cheapest relevant listing"}
+            continue
+        top = max(r[0] for r in rated)
+        if top < MIN_MATCH:
+            continue  # nothing here is really the piece
+        match, reason, listing = min((r for r in rated if r[0] >= top - VALUE_MARGIN), key=lambda r: r[2]["price"])
+        picks[number] = {"listing": listing, "match": match, "reason": reason}
+    return picks
+
+
+def _hunt(board: dict, pieces: list[dict], pin: dict | None = None) -> tuple[dict, dict, list[str]]:
+    """Search pieces in parallel and value-pick a listing for each.
+    Returns (picks, typical secondhand price per piece, queries that came up empty or failed)."""
+    options, typical, missed = {}, {}, []
+    for piece, found in zip(pieces, _search_pieces(pieces)):
+        if isinstance(found, str) or not found:
+            missed += [piece["query"]]
+            continue
+        options[piece["number"]] = _shortlist(found)
+        typical[piece["number"]] = statistics.median(l["price"] for l in found)
+    picks = _value_picks(board, pieces, options, pin) if options else {}
+    missed += [f"{p['query']} (no close match right now)" for p in pieces if p["number"] in options and p["number"] not in picks]
+    return picks, typical, missed
+
+
+# --- shop_the_pin ---
 
 
 def shop_the_pin(pin_number: int | None = None, pin_url: str | None = None, *, state: dict) -> str:
@@ -601,55 +701,30 @@ def shop_the_pin(pin_number: int | None = None, pin_url: str | None = None, *, s
     if not pieces:
         return _error(f"The user already owns every piece in pin {pin_number}. Tell them they can wear this look today.")
 
-    options, missing, typical_total = {}, [], 0.0
-    for piece, found in zip(pieces, _search_pieces(pieces)):
-        if isinstance(found, str):
-            return _error(found)
-        if not found:
-            missing += [piece["query"]]
-            continue
-        options[piece["number"]] = found[:OPTIONS_PER_PIECE]
-        typical_total += statistics.median(l["price"] for l in found)
-
-    if not options:
-        return _error(f"No secondhand listings found for any piece in pin {pin_number}. Suggest another pin.")
-
     pin = board["pins"][pin_number - 1]
-    content = [{"type": "text", "text": PIN_PROMPT.format(style=board["style"])},
-               {"type": "text", "text": f"The pin (pin {pin_number}):"}, {"type": "image_url", "image_url": {"url": pin["image"]}}]
-    for piece in pieces:
-        for k, l in enumerate(options.get(piece["number"], []), start=1):
-            content += [{"type": "text", "text": f"Piece {piece['number']} ({piece['query']}), option {k}: {l['title']} (${l['price']:g})"}]
-            if l.get("image"):
-                content += [{"type": "image_url", "image_url": {"url": l["image"]}}]
+    picks, typical, missed = _hunt(board, pieces, pin)
+    if not picks:
+        return _error(f"No good secondhand matches for the pieces in this pin right now ({', '.join(missed)}). Suggest another pin, or try again in a minute.")
 
-    picks = _vision(content, PinPicks)
-    chosen = {}
-    if isinstance(picks, PinPicks):
-        for p in picks.picks:
-            if p.piece in options and 1 <= p.option <= len(options[p.piece]):
-                chosen[p.piece] = (options[p.piece][p.option - 1], max(0, min(100, p.score)), p.reason)
-    # If the style check failed or skipped a piece, fall back to the most relevant listing
-    for number, opts in options.items():
-        chosen.setdefault(number, (opts[0], None, "style check unavailable; most relevant listing"))
-
-    order = [p["number"] for p in pieces if p["number"] in chosen]
-    shown = _show([chosen[n][0] for n in order], state)  # lets the user price-check or watch any pick
-    total = sum(l["price"] for l in shown)
+    order = [p["number"] for p in pieces if p["number"] in picks]
+    shown = _show([picks[n]["listing"] for n in order], state)  # lets the user price-check or watch any pick
     queries = {p["number"]: p["query"] for p in pieces}
+    total = sum(l["price"] for l in shown)
+    typical_total = sum(typical[n] for n in order)
     return json.dumps({
         "pin": pin_number if on_board else None,  # None: a pasted pin that isn't on the user's board
         "pin_image": pin["image"],
         "pin_link": pin["link"],
         "pieces": [
-            {"piece": n, "looking_for": queries[n], "pick": listing, "style_score": chosen[n][1], "reason": chosen[n][2]}
-            for n, listing in zip(order, shown)
+            {"piece": n, "looking_for": queries[n], "pick": card, "style_score": picks[n]["match"], "reason": picks[n]["reason"]}
+            for n, card in zip(order, shown)
         ],
         "already_own": [p["query"] for p in owned],
-        "not_found": missing,
+        "not_found": missed,
         "total": round(total, 2),
         "typical_secondhand_total": round(typical_total, 2),
         "saved_vs_typical": round(typical_total - total, 2),
+        "how_picked": f"For each piece: the cheapest listing within {VALUE_MARGIN} match points of the best match.",
     })
 
 
@@ -657,7 +732,7 @@ def shop_the_pin(pin_number: int | None = None, pin_url: str | None = None, *, s
 
 
 def board_unlock(budget: float, owned_pieces: list[int] | None = None, *, state: dict) -> str:
-    """Pick which pieces to buy within a budget to recreate the most outfits on the board."""
+    """Pick which real listings to buy within a budget to recreate the most outfits on the board."""
     board = _board_or_error(state)
     if isinstance(board, str):
         return board
@@ -676,54 +751,62 @@ def board_unlock(budget: float, owned_pieces: list[int] | None = None, *, state:
     if not needs:
         return _error("No outfit pins with identifiable garments on this board, so there is nothing to unlock.")
 
-    # Price only the pieces that appear in the most pins: they're the ones that can unlock outfits
+    # Hunt only the pieces that appear in the most pins: they're the ones that can unlock outfits
     pieces = {p["number"]: p for p in board["pieces"]}
     reach = {n: sum(n in need for need in needs.values()) for n in numbers - owned if pieces[n]["category"] in GARMENTS}
     candidates = sorted((n for n in reach if reach[n]), key=lambda n: -reach[n])[:UNLOCK_CANDIDATES]
 
-    prices = {}
-    for n, found in zip(candidates, _search_pieces([pieces[n] for n in candidates])):
-        if isinstance(found, str):
-            return _error(found)
-        if len(found) >= 4:
-            # A patient thrifter's price: the cheaper quarter of real listings, not the single cheapest fluke
-            prices[n] = round(statistics.quantiles([l["price"] for l in found], n=4)[0], 2)
+    # A real listing per piece, value-picked: the plan is priced from things you can actually buy
+    picks, _, missed = _hunt(board, [pieces[n] for n in candidates])
+    prices = {n: picks[n]["listing"]["price"] for n in picks}
 
-    def unlocked(have: set) -> set:
+    def recreated(have: set) -> set:
         return {pin for pin, need in needs.items() if need <= have}
 
-    # Few enough candidates to try every combination and take the true best, not a greedy guess
+    # Few enough pieces to try every combination: the true best plan, not a greedy guess.
+    # Ties go to the cheaper plan.
     best, best_cost = (), 0.0
-    best_pins = unlocked(owned)
+    best_pins = recreated(owned)
     for r in range(1, len(prices) + 1):
         for combo in combinations(prices, r):
             cost = sum(prices[n] for n in combo)
-            pins = unlocked(owned | set(combo))
+            pins = recreated(owned | set(combo))
             if cost <= budget and (len(pins), -cost) > (len(best_pins), -best_cost):
                 best, best_cost, best_pins = combo, cost, pins
 
-    # The single piece outside the plan that would unlock the most extra outfits
+    # The single piece outside the plan that would recreate the most extra outfits
     have = owned | set(best)
-    upgrades = [(len(unlocked(have | {n}) - best_pins), n) for n in prices if n not in have]
-    gain, upgrade = max(upgrades, default=(0, None))
+    upgrades = [(len(recreated(have | {n}) - best_pins), -prices[n], n) for n in prices if n not in have]
+    gain, _, upgrade = max(upgrades, default=(0, 0, None))
 
+    # Show the plan's listings (and the next buy) with ids, so they can be watched or price-checked
+    order = sorted(best, key=lambda n: -reach[n]) + ([upgrade] if gain else [])
+    cards = dict(zip(order, _show([picks[n]["listing"] for n in order], state)))
+    already = recreated(owned)
     return json.dumps({
+        "headline": f"${best_cost:.0f} of your ${budget:g} recreates {len(best_pins)} of the {len(needs)} outfits on this board.",
+        "outfits_recreated": len(best_pins),
+        "outfits_on_board": len(needs),
+        "outfits_recreated_by_what_you_own": len(already),
+        "pct_of_board": round(100 * len(best_pins) / len(needs)),
         "budget": budget,
         "spend": round(best_cost, 2),
-        "outfit_pins": len(needs),
-        "unlocked_already": sorted(unlocked(owned)),
-        "unlocked_with_plan": sorted(best_pins),
-        "pct_of_board": round(100 * len(best_pins) / len(needs)),
+        "recreated_pins": sorted(best_pins),
         "buy": [
-            {"piece": n, "query": pieces[n]["query"], "good_secondhand_price": prices[n], "in_pins": [p for p in needs if n in needs[p]]}
+            {"piece": n, "looking_for": pieces[n]["query"], "listing": cards[n], "match": picks[n]["match"],
+             "in_pins": sorted(p for p in needs if n in needs[p])}
             for n in best
         ],
         "next_best_buy": (
-            {"piece": upgrade, "query": pieces[upgrade]["query"], "price": prices[upgrade], "unlocks_more_pins": gain}
+            {"piece": upgrade, "looking_for": pieces[upgrade]["query"], "listing": cards[upgrade], "would_recreate_more": gain}
             if gain else None
         ),
-        "priced_from": {pieces[n]["query"]: p for n, p in prices.items()},
-        "how": "A pin counts as recreated when you have all of its garments. Prices are the 25th percentile of live secondhand listings.",
+        "couldnt_find": missed,
+        "how": (
+            "Each piece is priced by a real listing: the cheapest one within "
+            f"{VALUE_MARGIN} match points of the best match. A pin counts as recreated once you have all its garments. "
+            "Every combination of pieces within budget was tried."
+        ),
     })
 
 
@@ -916,9 +999,9 @@ TOOLS = [
     ),
     _tool(
         "shop_the_pin",
-        "Recreate one pin's whole outfit secondhand: searches every piece in that pin, has a stylist pick the listing "
-        "that best matches the pin's photo for each piece, and totals the outfit's cost against what those pieces "
-        "typically sell for secondhand. Call this when the user wants a specific pin or look, e.g. 'get me pin 6', "
+        "Recreate one pin's whole outfit secondhand: searches every piece in that pin, has a stylist score the "
+        "cheapest relevant listings against the pin's photo, and picks the best value per piece (the cheapest strong "
+        "match), then totals the outfit against what those pieces typically sell for secondhand. Call this when the user wants a specific pin or look, e.g. 'get me pin 6', "
         "'how much to recreate this outfit', or when they paste a link to a single pin (no board needed). Pass "
         "exactly one of pin_number or pin_url. The picks get listing ids, so they can be price-checked or watched after.",
         {
@@ -929,8 +1012,9 @@ TOOLS = [
     _tool(
         "board_unlock",
         "Plan which pieces to buy secondhand, within a budget, to be able to recreate the most outfit pins on the "
-        "board. It prices the pieces that appear in the most pins and tries every combination. Returns what to buy, "
-        "the pins it unlocks, the share of the board covered, and the single best next buy. Call this when the user "
+        "board. For the pieces that appear in the most pins it finds a real listing to buy (the cheapest strong "
+        "match), then tries every combination of those listings within budget. Returns a ready headline, the "
+        "listings to buy, the outfits they recreate, and the single best next buy. Quote its headline numbers as given. Call this when the user "
         "has a budget for the whole board or asks what to buy first or where to start. Pieces the user already owns "
         "count toward outfits for free.",
         {
@@ -992,3 +1076,6 @@ def run_tool(name: str, args: dict, state: dict) -> str:
         return TOOL_MAP[name](**args, state=state)
     except TypeError as e:
         return _error(f"Bad arguments for {name}: {e}")
+    except Exception as e:
+        # A surprise from an outside service (odd data, a network blip) becomes an error the model can relay
+        return _error(f"{name} failed unexpectedly ({type(e).__name__}). Tell the user to try again in a moment.")
