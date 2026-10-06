@@ -4,11 +4,13 @@ Every tool takes a keyword-only `state`: the session's scratchpad (session id, l
 listings shown). The harness passes it in; the model never sees or fills it.
 """
 
+import hashlib
 import json
 import os
 import re
 import statistics
 import threading
+import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -49,6 +51,40 @@ def _error(message: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="minutes")
+
+
+_db = None
+
+
+def _firestore():
+    global _db
+    if _db is None:
+        _db = firestore.Client()
+    return _db
+
+
+# Saved in Firestore too, so results survive Cloud Run restarts: the same board reads the same way
+# for a day, and repeat searches don't spend SerpAPI's 250/month quota.
+BOARD_TTL = 24 * 3600
+SEARCH_TTL = 6 * 3600
+
+
+def _saved(kind: str, key: str, max_age: int) -> str | None:
+    """A previously saved result, if it's fresh. The cache is an optimization: any failure is a miss."""
+    try:
+        doc = _firestore().collection(f"cache_{kind}").document(hashlib.sha1(key.encode()).hexdigest()).get()
+        if doc.exists and time.time() - doc.get("at") < max_age:
+            return doc.get("value")
+    except GoogleAPIError:
+        pass
+    return None
+
+
+def _save(kind: str, key: str, value: str) -> None:
+    try:
+        _firestore().collection(f"cache_{kind}").document(hashlib.sha1(key.encode()).hexdigest()).set({"key": key, "value": value, "at": time.time()})
+    except GoogleAPIError:
+        pass
 
 
 def _vision(content: list, schema: type[BaseModel]) -> BaseModel | str:
@@ -141,6 +177,10 @@ def _read_board(board_url: str) -> str:
     user, board = parsed
     if (user, board) in board_cache:
         return board_cache[user, board]
+    saved = _saved("board", f"{user}/{board}", BOARD_TTL)
+    if saved:
+        board_cache[user, board] = saved
+        return saved
 
     # Every public board has an RSS feed of its latest pins. No API key or login needed.
     try:
@@ -182,6 +222,7 @@ def _read_board(board_url: str) -> str:
         "pieces": pieces,
         "pins": pins,
     })
+    _save("board", f"{user}/{board}", board_cache[user, board])
     return board_cache[user, board]
 
 
@@ -234,6 +275,18 @@ def _serpapi(params: dict) -> dict | str:
 
 
 def _search(query: str, size: str | None = None, source: Source = "marketplaces") -> list[dict] | str:
+    """_fetch_listings, but served from the saved copy when one is fresh."""
+    key = json.dumps([query, size, source])
+    saved = _saved("search", key, SEARCH_TTL)
+    if saved:
+        return json.loads(saved)
+    listings = _fetch_listings(query, size, source)
+    if isinstance(listings, list):
+        _save("search", key, json.dumps(listings))
+    return listings
+
+
+def _fetch_listings(query: str, size: str | None, source: Source) -> list[dict] | str:
     """Search one source and normalize every priced result. Returns listings or an error message.
 
     Each listing remembers the search it came from, so later tools can re-run it (from cache) to get
@@ -621,15 +674,9 @@ def board_unlock(budget: float, owned_pieces: list[int] | None = None, *, state:
 
 # --- Watchlist (Firestore) ---
 
-_db = None
-
-
 def _watchlist(state: dict):
     """This session's watchlist collection. The session id comes from the harness, never the model."""
-    global _db
-    if _db is None:
-        _db = firestore.Client()
-    return _db.collection("watchlists").document(state["session_id"]).collection("items")
+    return _firestore().collection("watchlists").document(state["session_id"]).collection("items")
 
 
 def _slug(*parts) -> str:
