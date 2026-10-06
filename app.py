@@ -87,7 +87,7 @@ def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
         if not reply.tool_calls:
             return reply.content, tool_calls
 
-        # The harness, not the model, runs each tool and appends the result
+        # The harness runs each tool and appends the result
         for call in reply.tool_calls:
             args = json.loads(call.function.arguments)
             result = run_tool(call.function.name, args, state)

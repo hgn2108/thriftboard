@@ -16,3 +16,4 @@ resources/
 
 # Local editor/agent config
 .claude/
+CLAUDE.md
