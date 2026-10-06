@@ -3,192 +3,871 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Gemini Web Tool Calling</title>
+        <title>Thriftboard</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap"
+            rel="stylesheet"
+        />
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
         <style>
+            :root {
+                --bg: #faf7f2;
+                --card: #ffffff;
+                --ink: #2b2622;
+                --muted: #8a8178;
+                --line: #ebe4da;
+                --accent: #9c4a2f;
+                --accent-soft: #f4e7e1;
+                --steal: #2f7a4f;
+                --steal-bg: #e5f1e9;
+                --over: #a33a2a;
+                --over-bg: #f7e3de;
+                --radius: 14px;
+            }
             * {
                 box-sizing: border-box;
                 margin: 0;
                 padding: 0;
             }
             body {
-                font-family: system-ui, sans-serif;
-                height: 100vh;
+                font-family: Inter, system-ui, sans-serif;
+                background: var(--bg);
+                color: var(--ink);
+                line-height: 1.55;
+                font-size: 15px;
+            }
+            a {
+                color: inherit;
+            }
+            img {
+                display: block;
+            }
+
+            /* --- Layout --- */
+            header {
+                position: sticky;
+                top: 0;
+                z-index: 5;
+                background: rgba(250, 247, 242, 0.92);
+                backdrop-filter: blur(8px);
+                border-bottom: 1px solid var(--line);
+            }
+            .bar {
+                max-width: 780px;
+                margin: 0 auto;
+                padding: 0.8rem 1rem;
                 display: flex;
-                justify-content: center;
                 align-items: center;
-                padding: 3rem 1rem;
+                justify-content: space-between;
             }
-            #container {
-                width: 100%;
-                max-width: 900px;
-                display: flex;
-                flex-direction: column;
-                border: 1px solid #e0e0e0;
+            .logo {
+                font-family: Fraunces, Georgia, serif;
+                font-weight: 600;
+                font-size: 1.3rem;
+                letter-spacing: -0.01em;
             }
-            #messages {
-                overflow-y: auto;
-                padding: 2rem;
-                display: flex;
-                flex-direction: column;
-                gap: 1.5rem;
-                min-height: 450px;
-                max-height: 70vh;
+            .logo span {
+                color: var(--accent);
             }
-            .msg {
-                line-height: 1.5;
-                max-width: 80%;
-            }
-            .msg.user {
-                align-self: flex-end;
-                text-align: right;
-            }
-            .msg .role {
-                font-size: 0.75rem;
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-                color: #999;
-                margin-bottom: 0.25rem;
-            }
-            .msg.loading .content {
-                color: #999;
-            }
-            #input-area {
-                display: flex;
-                gap: 1rem;
-                padding: 1.5rem;
-                border-top: 1px solid #e0e0e0;
-            }
-            #user-input {
-                flex: 1;
-                padding: 0.75rem 0;
-                border: none;
-                border-bottom: 1px solid #e0e0e0;
-                font-size: 1rem;
-                outline: none;
-            }
-            #user-input:focus {
-                border-bottom-color: #000;
-            }
-            button {
-                padding: 0.75rem 1.5rem;
-                background: #000;
-                color: #fff;
-                border: none;
-                font-size: 0.75rem;
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
+            .ghost {
+                background: none;
+                border: 1px solid var(--line);
+                border-radius: 999px;
+                padding: 0.35rem 0.85rem;
+                font: inherit;
+                font-size: 0.82rem;
+                color: var(--muted);
                 cursor: pointer;
             }
-            .tool {
-                font-family: ui-monospace, monospace;
-                font-size: 0.75rem;
-                color: #555;
-                background: #f5f5f5;
-                border-left: 3px solid #f59e0b;
-                padding: 0.5rem 0.75rem;
-                margin: 0.25rem 0 0.75rem;
-                white-space: pre-wrap;
+            .ghost:hover {
+                color: var(--ink);
+                border-color: var(--muted);
+            }
+            main {
+                max-width: 780px;
+                margin: 0 auto;
+                padding: 1.5rem 1rem 11rem;
+            }
+
+            /* --- Welcome --- */
+            #welcome {
+                text-align: center;
+                padding: 12vh 0 2rem;
+            }
+            #welcome h1 {
+                font-family: Fraunces, Georgia, serif;
+                font-weight: 500;
+                font-size: clamp(1.9rem, 5vw, 2.6rem);
+                line-height: 1.15;
+                letter-spacing: -0.02em;
+                margin-bottom: 0.9rem;
+            }
+            #welcome p {
+                color: var(--muted);
+                max-width: 30rem;
+                margin: 0 auto;
+            }
+
+            /* --- Messages --- */
+            .msg {
+                margin-bottom: 1.6rem;
+                scroll-margin: 4.5rem 0 10rem; /* clear the sticky header and the composer */
+            }
+            .msg.user {
+                display: flex;
+                justify-content: flex-end;
+            }
+            .msg.user .bubble {
+                background: var(--ink);
+                color: var(--bg);
+                padding: 0.6rem 1rem;
+                border-radius: 18px 18px 4px 18px;
+                max-width: 80%;
                 word-break: break-word;
             }
-            .tool .label {
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-                color: #b45309;
+            .text p,
+            .text ul,
+            .text ol {
+                margin-bottom: 0.6rem;
             }
-            button:disabled {
-                opacity: 0.3;
+            .text ul,
+            .text ol {
+                padding-left: 1.3rem;
+            }
+            .text li {
+                margin-bottom: 0.15rem;
+            }
+            .text strong {
+                font-weight: 600;
+            }
+            .loading {
+                color: var(--muted);
+                display: flex;
+                align-items: center;
+                gap: 0.6rem;
+            }
+            .dots span {
+                display: inline-block;
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                background: var(--accent);
+                margin-right: 3px;
+                animation: blink 1.2s infinite;
+            }
+            .dots span:nth-child(2) {
+                animation-delay: 0.2s;
+            }
+            .dots span:nth-child(3) {
+                animation-delay: 0.4s;
+            }
+            @keyframes blink {
+                0%, 80%, 100% { opacity: 0.25; }
+                40% { opacity: 1; }
+            }
+
+            /* --- Shared visual pieces --- */
+            .block {
+                margin: 0.9rem 0;
+            }
+            .label {
+                font-size: 0.75rem;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                color: var(--muted);
+                margin-bottom: 0.5rem;
+            }
+            .chips {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.4rem;
+            }
+            .chip {
+                font-size: 0.8rem;
+                padding: 0.2rem 0.65rem;
+                border-radius: 999px;
+                background: var(--accent-soft);
+                color: var(--accent);
+            }
+
+            /* Pin grid */
+            .pins {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+                gap: 6px;
+            }
+            .pin {
+                position: relative;
+                aspect-ratio: 3 / 4;
+                border-radius: 8px;
+                overflow: hidden;
+                cursor: pointer;
+                border: none;
+                padding: 0;
+                background: var(--line);
+            }
+            .pin img {
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+                transition: transform 0.2s;
+            }
+            .pin:hover img {
+                transform: scale(1.05);
+            }
+            .pin b {
+                position: absolute;
+                top: 4px;
+                left: 4px;
+                background: rgba(255, 255, 255, 0.92);
+                font-size: 0.7rem;
+                font-weight: 600;
+                border-radius: 5px;
+                padding: 0 5px;
+            }
+            .pin.dim {
+                opacity: 0.35;
+            }
+
+            /* Listing cards */
+            .row {
+                display: grid;
+                grid-auto-flow: column;
+                grid-auto-columns: 160px;
+                gap: 10px;
+                overflow-x: auto;
+                padding-bottom: 6px;
+                scroll-snap-type: x mandatory;
+            }
+            .card {
+                background: var(--card);
+                border: 1px solid var(--line);
+                border-radius: var(--radius);
+                overflow: hidden;
+                text-decoration: none;
+                scroll-snap-align: start;
+                display: flex;
+                flex-direction: column;
+            }
+            .card:hover {
+                border-color: var(--muted);
+            }
+            .card .img {
+                position: relative;
+                aspect-ratio: 4 / 5;
+                background: var(--line);
+            }
+            .card .img img {
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+            }
+            .card .id {
+                position: absolute;
+                top: 6px;
+                left: 6px;
+                background: rgba(255, 255, 255, 0.92);
+                font-size: 0.7rem;
+                font-weight: 600;
+                border-radius: 5px;
+                padding: 0 5px;
+            }
+            .card .body {
+                padding: 0.55rem 0.65rem 0.65rem;
+                display: flex;
+                flex-direction: column;
+                gap: 0.25rem;
+                flex: 1;
+            }
+            .price {
+                font-weight: 600;
+            }
+            .site {
+                font-size: 0.75rem;
+                color: var(--muted);
+            }
+            .title {
+                font-size: 0.78rem;
+                color: var(--muted);
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+            }
+            .badges {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+                margin-top: auto;
+                padding-top: 0.2rem;
+            }
+            .badge {
+                text-transform: capitalize;
+                font-size: 0.7rem;
+                font-weight: 600;
+                border-radius: 5px;
+                padding: 0.05rem 0.4rem;
+                background: var(--line);
+                color: var(--ink);
+            }
+            .badge.steal {
+                background: var(--steal-bg);
+                color: var(--steal);
+            }
+            .badge.overpriced {
+                background: var(--over-bg);
+                color: var(--over);
+            }
+            .badge.match {
+                background: var(--accent-soft);
+                color: var(--accent);
+            }
+
+            /* Outfit (shop_the_pin) */
+            .outfit {
+                display: grid;
+                grid-template-columns: 170px 1fr;
+                gap: 14px;
+                background: var(--card);
+                border: 1px solid var(--line);
+                border-radius: var(--radius);
+                padding: 12px;
+            }
+            .outfit > img {
+                width: 100%;
+                border-radius: 10px;
+                aspect-ratio: 3 / 4;
+                object-fit: cover;
+            }
+            .picks {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .pick {
+                display: grid;
+                grid-template-columns: 56px 1fr auto;
+                gap: 10px;
+                align-items: center;
+                text-decoration: none;
+            }
+            .pick img {
+                width: 56px;
+                height: 70px;
+                object-fit: cover;
+                border-radius: 8px;
+                background: var(--line);
+            }
+            .pick .what {
+                font-size: 0.75rem;
+                color: var(--muted);
+                text-transform: capitalize;
+            }
+            .total {
+                margin-top: auto;
+                border-top: 1px solid var(--line);
+                padding-top: 8px;
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+            .total .big {
+                font-family: Fraunces, Georgia, serif;
+                font-size: 1.5rem;
+                font-weight: 600;
+            }
+            .save {
+                color: var(--steal);
+                font-weight: 600;
+                font-size: 0.85rem;
+            }
+
+            /* Coverage (board_unlock) */
+            .unlock {
+                background: var(--card);
+                border: 1px solid var(--line);
+                border-radius: var(--radius);
+                padding: 14px;
+            }
+            .unlock .big {
+                font-family: Fraunces, Georgia, serif;
+                font-size: 2.2rem;
+                font-weight: 600;
+                line-height: 1;
+            }
+            .meter {
+                height: 8px;
+                background: var(--line);
+                border-radius: 999px;
+                margin: 0.7rem 0 0.9rem;
+                overflow: hidden;
+            }
+            .meter div {
+                height: 100%;
+                background: var(--accent);
+                border-radius: 999px;
+            }
+            .buys {
+                list-style: none;
+                margin-bottom: 0.8rem;
+            }
+            .buys li {
+                display: flex;
+                justify-content: space-between;
+                gap: 1rem;
+                padding: 0.4rem 0;
+                border-bottom: 1px solid var(--line);
+                font-size: 0.9rem;
+            }
+            .buys li span:first-child::first-letter {
+                text-transform: uppercase;
+            }
+            .unlock .pins {
+                grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+            }
+
+            /* Watchlist */
+            .watch {
+                display: grid;
+                grid-template-columns: 48px 1fr;
+                gap: 10px;
+                align-items: center;
+                padding: 0.5rem 0;
+                border-bottom: 1px solid var(--line);
+            }
+            .watch img,
+            .watch .ph {
+                width: 48px;
+                height: 60px;
+                object-fit: cover;
+                border-radius: 8px;
+                background: var(--accent-soft);
+            }
+            .watch .status {
+                font-size: 0.8rem;
+                color: var(--muted);
+            }
+            .watch .status.good {
+                color: var(--steal);
+                font-weight: 600;
+            }
+
+            /* Tool trace */
+            details.steps {
+                margin-top: 0.4rem;
+                font-size: 0.78rem;
+                color: var(--muted);
+            }
+            details.steps summary {
+                cursor: pointer;
+                list-style: none;
+            }
+            details.steps summary::before {
+                content: "▸ ";
+            }
+            details.steps[open] summary::before {
+                content: "▾ ";
+            }
+            details.steps pre {
+                font-family: ui-monospace, monospace;
+                font-size: 0.72rem;
+                white-space: pre-wrap;
+                word-break: break-word;
+                background: #f2ede6;
+                border-radius: 8px;
+                padding: 0.6rem 0.75rem;
+                margin-top: 0.4rem;
+                max-height: 260px;
+                overflow: auto;
+            }
+            .note {
+                font-size: 0.85rem;
+                color: var(--muted);
+            }
+
+            /* --- Composer --- */
+            footer {
+                position: fixed;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                background: linear-gradient(transparent, var(--bg) 22%);
+                padding-top: 1.6rem;
+            }
+            .composer {
+                max-width: 780px;
+                margin: 0 auto;
+                padding: 0 1rem 1rem;
+            }
+            #suggestions {
+                display: flex;
+                gap: 0.4rem;
+                overflow-x: auto;
+                scrollbar-width: none;
+                margin-bottom: 0.6rem;
+            }
+            #suggestions button {
+                flex: none;
+                background: var(--card);
+                border: 1px solid var(--line);
+                border-radius: 999px;
+                padding: 0.4rem 0.85rem;
+                font: inherit;
+                font-size: 0.85rem;
+                cursor: pointer;
+                color: var(--ink);
+            }
+            #suggestions button:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            form {
+                display: flex;
+                gap: 0.5rem;
+                background: var(--card);
+                border: 1px solid var(--line);
+                border-radius: 999px;
+                padding: 0.35rem 0.35rem 0.35rem 1.1rem;
+                box-shadow: 0 6px 24px rgba(43, 38, 34, 0.07);
+            }
+            form:focus-within {
+                border-color: var(--muted);
+            }
+            #input {
+                flex: 1;
+                border: none;
+                outline: none;
+                font: inherit;
+                background: none;
+                min-width: 0;
+            }
+            #send {
+                background: var(--accent);
+                color: #fff;
+                border: none;
+                border-radius: 999px;
+                padding: 0.55rem 1.1rem;
+                font: inherit;
+                font-weight: 600;
+                cursor: pointer;
+            }
+            #send:disabled {
+                opacity: 0.4;
+                cursor: default;
+            }
+
+            @media (max-width: 560px) {
+                .outfit {
+                    grid-template-columns: 1fr;
+                }
+                .outfit > img {
+                    max-width: 200px;
+                }
+                .row {
+                    grid-auto-columns: 140px;
+                }
             }
         </style>
     </head>
     <body>
-        <div id="container">
-            <div id="messages"></div>
-            <div id="input-area">
-                <input
-                    type="text"
-                    id="user-input"
-                    placeholder="Type a message..."
-                    autocomplete="off"
-                />
-                <button id="send-btn">Send</button>
+        <header>
+            <div class="bar">
+                <div class="logo">Thrift<span>board</span></div>
+                <button class="ghost" id="new-chat">New chat</button>
             </div>
-        </div>
-        <script>
-            const messages = document.getElementById("messages");
-            const userInput = document.getElementById("user-input");
-            const sendBtn = document.getElementById("send-btn");
-            let sessionId = null;
+        </header>
 
-            function addMessage(role, text, isLoading = false) {
+        <main>
+            <section id="welcome">
+                <h1>Your Pinterest board,<br />found secondhand.</h1>
+                <p>Paste a public board link. Thriftboard reads your style, finds the pieces on Depop, Poshmark, eBay and more, and tells you what's worth buying.</p>
+            </section>
+            <div id="messages"></div>
+        </main>
+
+        <footer>
+            <div class="composer">
+                <div id="suggestions"></div>
+                <form id="form">
+                    <input id="input" placeholder="Paste a Pinterest board link…" autocomplete="off" />
+                    <button id="send" type="submit">Send</button>
+                </form>
+            </div>
+        </footer>
+
+        <script>
+            const SAMPLE_BOARD = "https://pin.it/15mMn5ekW";
+            const $ = (s) => document.querySelector(s);
+            const messages = $("#messages");
+            const input = $("#input");
+            const send = $("#send");
+
+            const parse = (s) => { try { return JSON.parse(s); } catch { return null; } };
+
+            // The session id is kept so the agent and the watchlist pick up where you left off.
+            const store = {
+                get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+                set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
+            };
+            let sessionId = store.get("thriftboard_session");
+            let board = sessionId ? parse(store.get("thriftboard_board")) : null; // last board read, for pin thumbnails
+            let shown = {}; // listing id -> listing, from the most recent results
+
+            // --- Helpers ---
+
+            const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+            const url = (u) => (/^https?:\/\//.test(u || "") ? esc(u) : "#");
+            const money = (p) => (p == null ? "" : "$" + (Number.isInteger(p) ? p : Number(p).toFixed(2)));
+            const img = (src, alt = "") => (src ? `<img src="${url(src)}" alt="${esc(alt)}" loading="lazy" referrerpolicy="no-referrer" />` : "");
+
+            function markdown(text) {
+                if (window.marked && window.DOMPurify) return DOMPurify.sanitize(marked.parse(text || ""));
+                return esc(text).replace(/\n/g, "<br>");
+            }
+
+            function setSuggestions(list) {
+                const box = $("#suggestions");
+                box.innerHTML = "";
+                for (const [label, message] of list) {
+                    const b = document.createElement("button");
+                    b.type = "button";
+                    b.textContent = label;
+                    b.onclick = () => ask(message || label);
+                    box.appendChild(b);
+                }
+            }
+
+            function startSuggestions() {
+                const list = [["Try a sample board", "Here's my board: " + SAMPLE_BOARD + ". What's my style?"]];
+                if (sessionId) list.push(["What's new on my watchlist?"]);
+                setSuggestions(list);
+            }
+
+            // --- Visual blocks, one per kind of tool result ---
+
+            function listingCard(l, verdict, score) {
+                const badges = [];
+                if (verdict && verdict.verdict !== "unknown") badges.push(`<span class="badge ${esc(verdict.verdict)}">${esc(verdict.verdict)}</span>`);
+                if (score) badges.push(`<span class="badge match">${esc(score.score)}% match</span>`);
+                return `<a class="card" href="${url(l.link)}" target="_blank" rel="noopener">
+                    <div class="img">${img(l.image, l.title)}${l.id ? `<span class="id">${esc(l.id)}</span>` : ""}</div>
+                    <div class="body">
+                        <div><span class="price">${money(l.price)}</span> <span class="site">· ${esc(l.site)}</span></div>
+                        <div class="title">${esc(l.title)}</div>
+                        ${badges.length ? `<div class="badges">${badges.join("")}</div>` : ""}
+                    </div></a>`;
+            }
+
+            const listingRow = (listings, verdicts = {}, scores = {}) =>
+                `<div class="block row">${listings.map((l) => listingCard(l, verdicts[l.id], scores[l.id])).join("")}</div>`;
+
+            function pinGrid(pins, highlight) {
+                return `<div class="pins">${pins
+                    .map((p) => `<button class="pin${highlight && !highlight.has(p.number) ? " dim" : ""}" data-pin="${p.number}" title="Recreate pin ${p.number}">${img(p.image)}<b>${p.number}</b></button>`)
+                    .join("")}</div>`;
+            }
+
+            function boardBlock(r) {
+                return `<div class="block">
+                    <div class="chips" style="margin-bottom:.8rem">${r.palette.map((c) => `<span class="chip">${esc(c)}</span>`).join("")}</div>
+                    <div class="label">${r.pins.length} pins · tap one to recreate it</div>
+                    ${pinGrid(r.pins)}</div>`;
+            }
+
+            function outfitBlock(r, verdicts) {
+                const picks = r.pieces
+                    .map((p) => {
+                        const v = verdicts[p.pick.id];
+                        return `<a class="pick" href="${url(p.pick.link)}" target="_blank" rel="noopener">
+                            ${img(p.pick.image, p.pick.title)}
+                            <div><div class="what">${esc(p.looking_for)}</div><div class="title">${esc(p.pick.title)}</div>
+                            <div class="badges">${p.style_score != null ? `<span class="badge match">${esc(p.style_score)}% match</span>` : ""}${v ? `<span class="badge ${esc(v.verdict)}">${esc(v.verdict)}</span>` : ""}<span class="badge">${esc(p.pick.id)}</span></div></div>
+                            <div><div class="price">${money(p.pick.price)}</div><div class="site">${esc(p.pick.site)}</div></div></a>`;
+                    })
+                    .join("");
+                const saved = r.saved_vs_typical > 0 ? `<span class="save">${money(Math.round(r.saved_vs_typical))} under typical</span>` : "";
+                const own = r.already_own?.length ? `<div class="note">Skipped what you own: ${esc(r.already_own.join(", "))}</div>` : "";
+                return `<div class="block outfit">${img(r.pin_image, "Pin " + r.pin)}
+                    <div class="picks"><div class="label">Pin ${esc(r.pin)}, secondhand</div>${picks}${own}
+                    <div class="total"><span>Outfit total <span class="big">${money(Math.round(r.total))}</span></span>${saved}</div></div></div>`;
+            }
+
+            function unlockBlock(r) {
+                const buys = r.buy.map((b) => `<li><span>${esc(b.query)}</span><span class="site">in ${b.in_pins.length} pins · ~${money(Math.round(b.good_secondhand_price))}</span></li>`).join("");
+                const next = r.next_best_buy ? `<div class="note">Next best: ${esc(r.next_best_buy.query)} (~${money(Math.round(r.next_best_buy.price))}) unlocks ${esc(r.next_best_buy.unlocks_more_pins)} more.</div>` : "";
+                const pins = board?.pins ? `<div class="label" style="margin-top:.9rem">Outfits you could wear</div>${pinGrid(board.pins, new Set(r.unlocked_with_plan))}` : "";
+                return `<div class="block unlock">
+                    <div class="big">${esc(r.unlocked_with_plan.length)} of ${esc(r.outfit_pins)}</div>
+                    <div class="note">outfits on your board for ${money(Math.round(r.spend))} of your ${money(r.budget)}</div>
+                    <div class="meter"><div style="width:${Math.min(100, Number(r.pct_of_board) || 0)}%"></div></div>
+                    ${buys ? `<div class="label">Buy</div><ul class="buys">${buys}</ul>` : ""}${next}${pins}</div>`;
+            }
+
+            function watchRow(w) {
+                let status, good = false;
+                if (w.kind === "search") {
+                    good = w.new_under_target.length > 0;
+                    status = good ? `${w.new_under_target.length} new under ${money(w.target_price)}` : `Nothing new under ${money(w.target_price)} · cheapest ${money(w.cheapest_now)}`;
+                } else {
+                    good = w.status.startsWith("price dropped");
+                    status = w.status;
+                }
+                const thumb = w.image ? img(w.image) : `<div class="ph"></div>`;
+                const name = w.kind === "search" ? `Search: ${w.query}` : `${money(w.price)} · ${w.title}`;
+                const extra = w.new_under_target?.length ? listingRow(w.new_under_target) : "";
+                return `<div class="watch">${thumb}<div><div class="title" style="color:var(--ink)">${esc(name)}</div><div class="status${good ? " good" : ""}">${esc(status)}</div></div></div>${extra}`;
+            }
+
+            function watchAdded(r) {
+                const cards = r.watching_listings || r.already_under_target || [];
+                const label = r.watching_search ? `Watching “${esc(r.watching_search)}” under ${money(r.target_price)}` + (cards.length ? " · already under:" : "") : "Watching for price drops";
+                return `<div class="block"><div class="label">${label}</div>${cards.length ? listingRow(cards) : ""}</div>`;
+            }
+
+            function visuals(calls) {
+                const results = calls.map((c) => ({ name: c.name, r: parse(c.result) })).filter((c) => c.r && !c.r.error);
+                const verdicts = {}, scores = {}, listed = new Set();
+                for (const { name, r } of results) {
+                    if (name === "price_verdict") for (const v of r.verdicts) verdicts[v.id] = v;
+                    if (name === "style_match") for (const s of r.scores) scores[s.id] = s;
+                }
+                let html = "";
+                for (const { name, r } of results) {
+                    if (name === "read_pinterest_board") {
+                        board = r;
+                        store.set("thriftboard_board", JSON.stringify(r));
+                        html += boardBlock(r);
+                    } else if (name === "search_listings") {
+                        shown = Object.fromEntries(r.listings.map((l) => [l.id, l]));
+                        r.listings.forEach((l) => listed.add(l.id));
+                        if (r.listings.length) html += listingRow(r.listings, verdicts, scores);
+                    } else if (name === "shop_the_pin") {
+                        shown = Object.fromEntries(r.pieces.map((p) => [p.pick.id, p.pick]));
+                        r.pieces.forEach((p) => listed.add(p.pick.id));
+                        html += outfitBlock(r, verdicts);
+                    } else if (name === "board_unlock") html += unlockBlock(r);
+                    else if (name === "watch_item") html += watchAdded(r);
+                    else if (name === "check_watchlist" && r.watching.length) html += `<div class="block">${r.watching.map(watchRow).join("")}</div>`;
+                }
+                // A verdict or style score about listings shown in an earlier turn: show those cards again
+                const ids = Object.keys(scores).length ? Object.keys(scores).sort((a, b) => scores[b].score - scores[a].score) : Object.keys(verdicts);
+                const again = ids.filter((id) => !listed.has(id) && shown[id]);
+                if (again.length) html += listingRow(again.map((id) => shown[id]), verdicts, scores);
+                return html;
+            }
+
+            function steps(calls) {
+                if (!calls.length) return "";
+                const trace = calls
+                    .map((c) => {
+                        const result = c.result.length > 700 ? c.result.slice(0, 700) + " …" : c.result;
+                        return `${c.name}(${JSON.stringify(c.args)})\n→ ${result}`;
+                    })
+                    .join("\n\n");
+                return `<details class="steps"><summary>${calls.length} tool call${calls.length > 1 ? "s" : ""}: ${esc(calls.map((c) => c.name).join(", "))}</summary><pre>${esc(trace)}</pre></details>`;
+            }
+
+            function nextSuggestions() {
+                input.placeholder = board ? "Ask about your board…" : "Paste a Pinterest board link…";
+                if (!board) return startSuggestions();
+                const firstPin = board.pieces?.[0]?.pins?.[0] || 1;
+                setSuggestions([
+                    [`Recreate pin ${firstPin}`],
+                    ["I have $100. What should I buy first?"],
+                    ["Find piece 1 under $40"],
+                    ["What's new on my watchlist?"],
+                ]);
+            }
+
+            // --- Chat ---
+
+            function addMessage(role, html) {
                 const div = document.createElement("div");
-                div.className =
-                    "msg " +
-                    (role === "you" ? "user" : "assistant") +
-                    (isLoading ? " loading" : "");
-                div.innerHTML =
-                    '<div class="role">' +
-                    role +
-                    '</div><div class="content">' +
-                    text +
-                    "</div>";
+                div.className = "msg " + role;
+                div.innerHTML = html;
                 messages.appendChild(div);
-                messages.scrollTop = messages.scrollHeight;
+                div.scrollIntoView({ behavior: "smooth", block: "end" });
                 return div;
             }
 
-            async function send() {
-                const text = userInput.value.trim();
-                if (!text) return;
+            function loadingStatus(text) {
+                if (/pinterest|pin\.it/i.test(text)) return ["Reading your pins", "Picking out the pieces", "Almost there"];
+                if (/pin \d|outfit|look/i.test(text)) return ["Hunting down each piece", "Matching them to the pin", "Almost there"];
+                if (/budget|what should i buy|\$\d+\. /i.test(text)) return ["Pricing your board", "Finding the best combination", "Almost there"];
+                if (/watch/i.test(text)) return ["Checking your watchlist", "Almost there"];
+                return ["Searching resale sites", "Comparing prices", "Almost there"];
+            }
 
-                userInput.value = "";
-                sendBtn.disabled = true;
-                addMessage("you", text);
-                const loading = addMessage("assistant", "Thinking...", true);
+            async function ask(text) {
+                text = text.trim();
+                if (!text || send.disabled) return;
+                $("#welcome").hidden = true;
+                input.value = "";
+                send.disabled = true;
+                setSuggestions([]);
+                addMessage("user", `<div class="bubble">${esc(text)}</div>`);
+
+                const status = loadingStatus(text);
+                const loading = addMessage("assistant", `<div class="loading"><span class="dots"><span></span><span></span><span></span></span><span class="s">${status[0]}…</span></div>`);
+                let i = 0;
+                const timer = setInterval(() => {
+                    i = Math.min(i + 1, status.length - 1);
+                    loading.querySelector(".s").textContent = status[i] + "…";
+                }, 7000);
 
                 try {
                     const res = await fetch("/chat", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            message: text,
-                            session_id: sessionId,
-                        }),
+                        body: JSON.stringify({ message: text, session_id: sessionId }),
                     });
                     const data = await res.json();
                     sessionId = data.session_id;
-
-                    // Show each tool the harness ran, above the assistant's answer
-                    for (const call of data.tool_calls || []) {
-                        const div = document.createElement("div");
-                        div.className = "tool";
-                        const label = document.createElement("span");
-                        label.className = "label";
-                        label.textContent = "tool call  ";
-                        div.appendChild(label);
-                        div.appendChild(
-                            document.createTextNode(
-                                call.name + "(" + JSON.stringify(call.args) + ")\n→ " + call.result,
-                            ),
-                        );
-                        messages.insertBefore(div, loading);
-                    }
-                    loading.querySelector(".content").textContent =
-                        data.response;
-                    loading.classList.remove("loading");
+                    store.set("thriftboard_session", sessionId);
+                    loading.innerHTML = `<div class="text">${markdown(data.response)}</div>${visuals(data.tool_calls || [])}${steps(data.tool_calls || [])}`;
+                    loading.scrollIntoView({ behavior: "smooth", block: "start" }); // start reading at the top of the reply
                 } catch (e) {
-                    loading.querySelector(".content").textContent =
-                        "Error: " + e.message;
-                    loading.classList.remove("loading");
+                    loading.innerHTML = `<div class="note">Couldn't reach Thriftboard. Check your connection and try again.</div>`;
+                } finally {
+                    clearInterval(timer);
+                    send.disabled = false;
+                    nextSuggestions();
+                    input.focus();
                 }
-                sendBtn.disabled = false;
-                userInput.focus();
             }
 
-            sendBtn.addEventListener("click", send);
-            userInput.addEventListener("keydown", function (e) {
-                if (e.key === "Enter") send();
+            $("#form").addEventListener("submit", (e) => {
+                e.preventDefault();
+                ask(input.value);
             });
-            userInput.focus();
+
+            // Tapping a pin fills in the request, so it can be tweaked before sending
+            messages.addEventListener("click", (e) => {
+                const pin = e.target.closest(".pin");
+                if (!pin) return;
+                input.value = `Recreate pin ${pin.dataset.pin}`;
+                input.focus();
+            });
+
+            $("#new-chat").addEventListener("click", async () => {
+                if (sessionId) fetch("/clear?session_id=" + encodeURIComponent(sessionId), { method: "POST" });
+                sessionId = null;
+                store.set("thriftboard_session", null);
+                store.set("thriftboard_board", null);
+                board = null;
+                shown = {};
+                messages.innerHTML = "";
+                $("#welcome").hidden = false;
+                nextSuggestions();
+                input.focus();
+            });
+
+            nextSuggestions();
         </script>
     </body>
 </html>

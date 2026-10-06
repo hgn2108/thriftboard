@@ -13,3 +13,6 @@ __pycache__/
 
 # Course materials (local reference only)
 resources/
+
+# Local editor/agent config
+.claude/
